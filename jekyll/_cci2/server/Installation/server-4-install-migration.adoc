@@ -1,0 +1,147 @@
+---
+version:
+- Server v4.x
+- Server Admin
+---
+= CircleCI Server v4.x Migration
+:page-layout: classic-docs
+:page-liquid:
+:page-description: Learn now to migrate from CircleCI server 3.x to 4.x.
+:icons: font
+:toc: macro
+:toc-title:
+
+Migrating from 3.x to 4.x is inplace migration which requires you to generate helm-value file which will be used in helm command to upgrade the CircleCI Server to v4.x.
+
+We recommend using a staging environment before completing this process in a production environment. This not only allows you to gain a better understanding of the migration process, but also gives you an idea of how long the migration will take to complete.
+
+toc::[]
+
+## Prerequisites
+
+. Your current CircleCI Server installation is 3.x.
+. You have taken a backup of the 3.x instance. If you are using external datastores, they need to be backed up separately.
+. You dont need a new CircleCI Server 4.x as it is an inplace migration.
+. The migration script must be run from a machine with below tools:
+- link:https://kubernetes.io/docs/tasks/tools/#kubectl[kubectl] configured for the server 3.x instance
+- link:https://github.com/mikefarah/yq#install[yq]
+- link:https://github.com/helm/helm#install[helm]
+- link:https://github.com/databus23/helm-diff#install[helm-diff]
+
+## Migration
+
+To do inplace upgrade of CircleCI Server 3.x to 4.x, You have to execute a migration script which will perform below task:
+
+* Export the kots config values into a yaml file
+* Modify the exported yaml file to be use with `helm` for server 4.x
+* Annotate all the kubernetes resource for helm
+* Execute postgres db `domain` migration
+* Display output message with the next steps
+
+The kots-exporter script can also perform below functions if required:
+
+* Rerun the annotation step only (`-f annotate`)
+* Run the kots-annotation cleanup job (-f )
+* Display the output message (`-f message`)
+* Rerun the postgresql database migration (`-f flyway`)
+
+### Step 1 - Create docker secret for CircleCI image registry
+
+In a terminal:
+
+```
+kubectl -n <namespace> create secret docker-registry regcred \
+  --docker-server=<image-registry-hostname> \
+  --docker-username=<image-registry-username> \
+  --docker-password=<image-registry-password> \
+  --docker-email=<notification-email-id>
+```
+
+### Step 2 - Clone the repository and run the kots-exporter script
+The instructions below will clone the repository containing the kots exporter script which will generate the `helm-value` file for server 4.x.
+
+. Run `git clone \https://github.com/CircleCI-Public/server-scripts`.
+. Change into the `server-kots-exporter` directory: `cd server-scripts/server-kots-exporter`.
+. Run the migration script: `./kots-exporter.sh`.
+. Run below command to fetch the release-name of CircleCI Server 3.x installation
+```
+  helm list -n <namespace>
+```
+. You will be prompted for the following information:
+  * Release Name of your server 3.x installation (Value of "NAME" in helm list output)
+  * Kubernetes namespace of your server 3.x installation (Value of "NAMESPACE in helm list output)
+  * License String for Server 4.x
+
+. After the script has completed, It will display a message for the next steps to perform. Messgae will be like below - 
+
+```
+############ HELM Commands ################
+Output file is here - <path>/server-kots-exporter/output/helm-values.yaml
+
+To upgrade Postgres Chart(v11.6.0), follow below steps -
+-------------------------------------------------------------------------
+export POSTGRESQL_PASSWORD=$(kubectl get secret --namespace <namespace> postgresql -o jsonpath="{.data.postgres-password}" | base64 --decode)
+export POSTGRESQL_PVC=$(kubectl get pvc --namespace <namespace> -l app.kubernetes.io/instance=circleci-server,role=primary -o jsonpath="{.items[0].metadata.name}")
+kubectl delete statefulsets.apps postgresql --namespace <namespace> --cascade=orphan
+kubectl delete secret postgresql --namespace <namespace>
+-------------------------------------------------------------------------
+
+Helm Diff command - helm diff upgrade <release-name> -n <namespace> -f <path>/server-kots-exporter/output/helm-values.yaml <chart>
+Helm upgrade command - helm upgrade <release-name> -n <namespace> -f <path>/server-kots-exporter/output/helm-values.yaml <chart>
+```
+
+. With Server 4.x, Postgres chart is also being migrated hence, you must execute the commands mentioned in output message.
+
+### Step 3 - Validate your helm-value file
+Validate the generated helm value file for values and modify if want to modify anything. 
+
+### Step 3 - Generate helm-diff output
+Once, helm-value file is varified, execute the helm-diff command and review the output - 
+
+```
+ helm diff upgrade <release-name> -n <namespace> -f <path>/server-kots-exporter/output/helm-values.yaml --show-secrets <chart-directory> 
+```
+
+Review the output generated from above command with below legends - 
+line displayed in "Yellow" - Kubernetes resources status (i.e. - changed)
+line displayed in "Red"    - Deletion  (i.e. - image)
+line displayed in "Green"  - Addition (i.e. - imagePullSecret)
+
+Below are the chages you exptect to see as a helm-diff output -
+
+* `imagePullSecrets` is being added into all the k8s resources  
+* Containers `image` are being updated  
+* Diffrent secret `value` are now referencing kubernetes secrets rather than static string value  
+* Environment variables for RABBITMQ & MONGODB uri are being change  
+* Environment variables for VM, OUTPUT & NOMAD service uri are refrecing to <domain_name>:<service_port>  
+* Checksum for github is being added as annotations  
+* Upsteam charts will be recreated (delete & create) -  
+  - circleci-server-kube-state-metrics  
+  - prometheus - node-exporter  
+  - prometheus-server  
+  - mongodb  
+  - rabbitmq  
+  - redis-master  
+  - redis-slave  
+* These resources will be deleted -  
+  - circleci-server-traefik  
+
+### Step 4 - Generate helm-diff output
+Once, helm-value file is verified, Run the below command to upgrade the CircleCI Server 3.x to 4.x
+```
+helm upgrade <release-name> -n <namespace> -f <path>/server-kots-exporter/output/helm-values.yaml <chart>
+```
+
+### Step 5 - Validate your migration to Server 4.0
+Re-run https://support.circleci.com/hc/en-us/articles/360011235534-Using-realitycheck-to-validate-your-CircleCI-installation[realitycheck]
+with contexts on your new server 4.x environment by pushing a fresh commit.
+
+### Step 6 - Update your team
+Once you have successfully run https://support.circleci.com/hc/en-us/articles/360011235534-Using-realitycheck-to-validate-your-CircleCI-installation[realitycheck],
+notify your team of the new CircleCI UI and URL, if it has changed.
+
+ifndef::pdf[]
+## What to read next
+* https://circleci.com/docs/2.0/server-3-install-hardening-your-cluster[Hardening Your Cluster]
+* https://circleci.com/docs/2.0/server-4-operator-overview[Server 4.x Operator Guide]
+endif::[]
